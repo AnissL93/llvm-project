@@ -809,9 +809,11 @@ DiagnosedSilenceableFailure RewriteMatmulAsMmaSyncOp::applyToOne(
              << "only matmul ops with non-extended semantics are supported";
     }
     Location loc = linalgOp.getLoc();
-    // TODO: more robust computation of laneId, for now assume a single warp.
-    Value laneId = gpu::ThreadIdOp::create(
-        rewriter, loc, rewriter.getIndexType(), gpu::Dimension::x);
+    // mma.sync is a warp-level operation: index the fragments with the lane id
+    // so that the rewrite is correct for any number and layout of warps in the
+    // block, not only when the x dimension of the block is a single warp.
+    Value laneId =
+        gpu::LaneIdOp::create(rewriter, loc, rewriter.getIndexAttr(32));
     if (succeeded(MmaSyncBuilder(rewriter, loc, laneId).buildMmaSync(linalgOp)))
       fail = false;
   }
