@@ -579,6 +579,50 @@ private:
   }
 
   //===--------------------------------------------------------------------===//
+  // m16n8k32 8-bit float (e4m3 / e5m2) case.
+  //===--------------------------------------------------------------------===//
+  /// From the NVIDIA doc:
+  /// groupID           = %laneid >> 2
+  /// threadIDInGroup = %laneid % 4
+  ///
+  /// row =      groupID            for ai where  0 <= i < 4 || 8 <= i < 12
+  ///           groupID + 8         Otherwise
+  ///
+  /// col =  (threadIDInGroup * 4) + (i & 0x3)          for ai where i <  8
+  ///        (threadIDInGroup * 4) + (i & 0x3) + 16     for ai where i >= 8
+  static SmallVector<RowColIndexing> m16n8k32f8Lhs(MLIRContext *ctx) {
+    auto dim = getAffineDimExpr(0, ctx);
+    AffineExpr groupID = dim.floorDiv(4);
+    AffineExpr threadIDInGroup = dim % 4;
+    SmallVector<RowColIndexing> res;
+    for (int64_t i = 0; i < 16; ++i) {
+      AffineExpr row = (i < 4 || (i >= 8 && i < 12)) ? groupID : groupID + 8;
+      AffineExpr col = threadIDInGroup * 4 + (i & 0x3) + (i >= 8 ? 16 : 0);
+      res.push_back(RowColIndexing{row, col});
+    }
+    return res;
+  }
+
+  /// From the NVIDIA doc:
+  /// groupID           = %laneid >> 2
+  /// threadIDInGroup = %laneid % 4
+  ///
+  /// row =  (threadIDInGroup * 4) + (i & 0x3)           for bi where i <  4
+  ///        (threadIDInGroup * 4) + (i & 0x3) + 16      for bi where i >= 4
+  ///
+  /// col = groupID
+  static SmallVector<RowColIndexing> m16n8k32f8Rhs(MLIRContext *ctx) {
+    auto dim = getAffineDimExpr(0, ctx);
+    AffineExpr groupID = dim.floorDiv(4);
+    AffineExpr threadIDInGroup = dim % 4;
+    SmallVector<RowColIndexing> res;
+    for (int64_t i = 0; i < 8; ++i)
+      res.push_back(RowColIndexing{
+          threadIDInGroup * 4 + (i & 0x3) + (i >= 4 ? 16 : 0), groupID});
+    return res;
+  }
+
+  //===--------------------------------------------------------------------===//
   /// Helper functions to create customizable load and stores operations. The
   /// specific shapes of each MMA instruction are passed via the
   /// IndexCalculator callback.
@@ -733,6 +777,7 @@ MmaSyncBuilder::getIndexCalculators(ArrayRef<int64_t> opShape,
                                     TypeRange elementalTypes) {
   // TODO: Tablegen all this.
   Type f16 = b.getF16Type();
+  Type bf16 = b.getBF16Type();
   Type f32 = b.getF32Type();
   if (opShape == ArrayRef<int64_t>{16, 8, 4} &&
       elementalTypes == TypeRange{f32, f32, f32}) {
@@ -743,14 +788,30 @@ MmaSyncBuilder::getIndexCalculators(ArrayRef<int64_t> opShape,
                        SmallVector<int64_t>{opShape},
                        /*tf32Enabled=*/true};
   }
-  // This is the version with f16 accumulation.
-  // TODO: version with f32 accumulation.
+  // The m16n8k16 fragment layout only depends on the 16-bit operand width, and
+  // the f32 accumulator occupies the same (row, col) positions as the f16 one,
+  // so f16 and bf16 operands with f16 or f32 accumulation share the indexing.
   if (opShape == ArrayRef<int64_t>{16, 8, 16} &&
-      elementalTypes == TypeRange{f16, f16, f16}) {
+      (elementalTypes == TypeRange{f16, f16, f16} ||
+       elementalTypes == TypeRange{f16, f16, f32} ||
+       elementalTypes == TypeRange{bf16, bf16, f32})) {
     return MmaSyncInfo{std::make_tuple(&MmaSyncBuilder::m16n8k16f16Lhs,
                                        &MmaSyncBuilder::m16n8k16f16Rhs,
                                        &MmaSyncBuilder::m16n8k16f16Res),
                        makeVectorShapes({4, 2}, {2, 2}, {2, 2}),
+                       SmallVector<int64_t>{opShape},
+                       /*tf32Enabled=*/false};
+  }
+  // m16n8k32 with 8-bit float operands (both e4m3 or both e5m2, as required by
+  // nvgpu.mma.sync) and f32 accumulation. The accumulator layout matches the
+  // m16n8k16 one.
+  if (opShape == ArrayRef<int64_t>{16, 8, 32} &&
+      isa<Float8E4M3FNType, Float8E5M2Type>(elementalTypes[0]) &&
+      elementalTypes[1] == elementalTypes[0] && elementalTypes[2] == f32) {
+    return MmaSyncInfo{std::make_tuple(&MmaSyncBuilder::m16n8k32f8Lhs,
+                                       &MmaSyncBuilder::m16n8k32f8Rhs,
+                                       &MmaSyncBuilder::m16n8k16f16Res),
+                       makeVectorShapes({4, 4}, {2, 4}, {2, 2}),
                        SmallVector<int64_t>{opShape},
                        /*tf32Enabled=*/false};
   }

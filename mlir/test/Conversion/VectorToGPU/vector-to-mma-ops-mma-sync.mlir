@@ -835,3 +835,61 @@ func.func @unsupported_transposed_store(%arg0: !smem_type,
   vector.transfer_write %D, %arg2[%c0, %c0] {in_bounds = [true, true], permutation_map = affine_map<(d0, d1)->(d1, d0)>} : vector<16x8xf16>, !smem_type
   return
 }
+
+// -----
+
+//#########################################################################
+// BF16 row-col-row with f32 accumulation.
+//#########################################################################
+
+#map1 = affine_map<(d0, d1, d2) -> (d0, d2)>
+#map2 = affine_map<(d0, d1, d2) -> (d1, d2)>
+#map3 = affine_map<(d0, d1, d2) -> (d0, d1)>
+
+// CHECK-LABEL: func @m16n8k16_bf16_f32_row_col_row
+func.func @m16n8k16_bf16_f32_row_col_row(%arg0: memref<20x20xbf16, #gpu.address_space<workgroup>>, %arg1: memref<20x20xbf16, #gpu.address_space<workgroup>>, %arg2: memref<20x20xf32>) {
+  %c0 = arith.constant 0 : index
+  %cst = arith.constant 0.000000e+00 : bf16
+  %cst0 = arith.constant 0.000000e+00 : f32
+
+  // CHECK: nvgpu.ldmatrix %arg0[{{.*}}] numTiles = 4 transpose = false : memref<20x20xbf16, #gpu.address_space<workgroup>> -> vector<4x2xbf16>
+  // CHECK: nvgpu.ldmatrix %arg1[{{.*}}] numTiles = 2 transpose = false : memref<20x20xbf16, #gpu.address_space<workgroup>> -> vector<2x2xbf16>
+  // CHECK-COUNT-2: vector.load %arg2[{{.*}}] : memref<20x20xf32>, vector<2xf32>
+  %A = vector.transfer_read %arg0[%c0, %c0], %cst {in_bounds = [true, true]} : memref<20x20xbf16, #gpu.address_space<workgroup>>, vector<16x16xbf16>
+  %B = vector.transfer_read %arg1[%c0, %c0], %cst {in_bounds = [true, true]} : memref<20x20xbf16, #gpu.address_space<workgroup>>, vector<8x16xbf16>
+  %C = vector.transfer_read %arg2[%c0, %c0], %cst0 {in_bounds = [true, true]} : memref<20x20xf32>, vector<16x8xf32>
+  // CHECK: nvgpu.mma.sync({{.*}}) mmaShape = [16, 8, 16] : (vector<4x2xbf16>, vector<2x2xbf16>, vector<2x2xf32>) -> vector<2x2xf32>
+  %D = vector.contract {indexing_maps = [#map1, #map2, #map3], iterator_types = ["parallel", "parallel", "reduction"], kind = #vector.kind<add>} %A, %B, %C : vector<16x16xbf16>, vector<8x16xbf16> into vector<16x8xf32>
+  // CHECK-COUNT-2: vector.store {{.*}} : memref<20x20xf32>, vector<2xf32>
+  vector.transfer_write %D, %arg2[%c0, %c0] {in_bounds = [true, true]} : vector<16x8xf32>, memref<20x20xf32>
+  return
+}
+
+// -----
+
+//#########################################################################
+// FP8 (e4m3) row-col-row with f32 accumulation.
+//#########################################################################
+
+#map1 = affine_map<(d0, d1, d2) -> (d0, d2)>
+#map2 = affine_map<(d0, d1, d2) -> (d1, d2)>
+#map3 = affine_map<(d0, d1, d2) -> (d0, d1)>
+
+// CHECK-LABEL: func @m16n8k32_f8E4M3FN_f32_row_col_row
+func.func @m16n8k32_f8E4M3FN_f32_row_col_row(%arg0: memref<128x128xf8E4M3FN, #gpu.address_space<workgroup>>, %arg1: memref<128x128xf8E4M3FN, #gpu.address_space<workgroup>>, %arg2: memref<128x128xf32>) {
+  %c0 = arith.constant 0 : index
+  %cst = arith.constant 0.000000e+00 : f8E4M3FN
+  %cst0 = arith.constant 0.000000e+00 : f32
+
+  // CHECK: nvgpu.ldmatrix %arg0[{{.*}}] numTiles = 4 transpose = false : memref<128x128xf8E4M3FN, #gpu.address_space<workgroup>> -> vector<4x4xf8E4M3FN>
+  // CHECK: nvgpu.ldmatrix %arg1[{{.*}}] numTiles = 2 transpose = false : memref<128x128xf8E4M3FN, #gpu.address_space<workgroup>> -> vector<2x4xf8E4M3FN>
+  // CHECK-COUNT-2: vector.load %arg2[{{.*}}] : memref<128x128xf32>, vector<2xf32>
+  %A = vector.transfer_read %arg0[%c0, %c0], %cst {in_bounds = [true, true]} : memref<128x128xf8E4M3FN, #gpu.address_space<workgroup>>, vector<16x32xf8E4M3FN>
+  %B = vector.transfer_read %arg1[%c0, %c0], %cst {in_bounds = [true, true]} : memref<128x128xf8E4M3FN, #gpu.address_space<workgroup>>, vector<8x32xf8E4M3FN>
+  %C = vector.transfer_read %arg2[%c0, %c0], %cst0 {in_bounds = [true, true]} : memref<128x128xf32>, vector<16x8xf32>
+  // CHECK: nvgpu.mma.sync({{.*}}) mmaShape = [16, 8, 32] : (vector<4x4xf8E4M3FN>, vector<2x4xf8E4M3FN>, vector<2x2xf32>) -> vector<2x2xf32>
+  %D = vector.contract {indexing_maps = [#map1, #map2, #map3], iterator_types = ["parallel", "parallel", "reduction"], kind = #vector.kind<add>} %A, %B, %C : vector<16x32xf8E4M3FN>, vector<8x32xf8E4M3FN> into vector<16x8xf32>
+  // CHECK-COUNT-2: vector.store {{.*}} : memref<128x128xf32>, vector<2xf32>
+  vector.transfer_write %D, %arg2[%c0, %c0] {in_bounds = [true, true]} : vector<16x8xf32>, memref<128x128xf32>
+  return
+}

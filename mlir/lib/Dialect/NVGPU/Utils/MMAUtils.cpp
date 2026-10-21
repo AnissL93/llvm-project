@@ -100,8 +100,9 @@ nvgpu::getMmaSyncRegisterType(const WarpMatrixInfo &type) {
   const bool isAccum = isAccumulatorOrResult(type.operandRole);
 
   Type elType = type.vectorType.getElementType();
-  if (elType.isF16()) {
-    return FragmentElementInfo{VectorType::get(2, Float16Type::get(ctx)), 2, 32,
+  // f16 and bf16 operands share the 16-bit fragment layout.
+  if (elType.isF16() || elType.isBF16()) {
+    return FragmentElementInfo{VectorType::get(2, elType), 2, 32,
                                inferNumRegistersPerMatrixFragment(type)};
   }
 
@@ -115,10 +116,11 @@ nvgpu::getMmaSyncRegisterType(const WarpMatrixInfo &type) {
                                      inferNumRegistersPerMatrixFragment(type)};
   }
 
-  // int8 operand
-  if (elType.isInteger(8)) {
-    return FragmentElementInfo{VectorType::get(4, IntegerType::get(ctx, 8)), 4,
-                               32, inferNumRegistersPerMatrixFragment(type)};
+  // int8 and 8-bit float (e4m3 / e5m2) operands share the 8-bit fragment
+  // layout.
+  if (elType.isInteger(8) || isa<Float8E4M3FNType, Float8E5M2Type>(elType)) {
+    return FragmentElementInfo{VectorType::get(4, elType), 4, 32,
+                               inferNumRegistersPerMatrixFragment(type)};
   }
 
   // int4 operand

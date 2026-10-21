@@ -115,3 +115,110 @@ module attributes {transform.with_named_sequence} {
     transform.yield
   }
 }
+
+// -----
+
+// CHECK-LABEL: func.func @matmul_16x8x16xf16_f32acc_global
+func.func @matmul_16x8x16xf16_f32acc_global(
+    %A: memref<16x16xf16>, %B: memref<16x8xf16>, %C: memref<16x8xf32>) {
+
+  // CHECK-COUNT-8: memref.load {{.*}} : memref<16x16xf16>
+  // CHECK-COUNT-8: vector.insert {{.*}} : f16 into vector<4x2xf16>
+  // CHECK-COUNT-4: memref.load {{.*}} : memref<16x8xf16>
+  // CHECK-COUNT-4: vector.insert {{.*}} : f16 into vector<2x2xf16>
+  // CHECK-COUNT-4: memref.load {{.*}} : memref<16x8xf32>
+  // CHECK-COUNT-4: vector.insert {{.*}} : f32 into vector<2x2xf32>
+  //
+  //         CHECK: nvgpu.mma.sync(%{{.*}}) mmaShape = [16, 8, 16]
+  //    CHECK-SAME:   : (vector<4x2xf16>, vector<2x2xf16>, vector<2x2xf32>) -> vector<2x2xf32>
+  //
+  // CHECK-COUNT-4: vector.extract %{{.*}} : f32 from vector<2x2xf32>
+  // CHECK-COUNT-4: memref.store %{{.*}} : memref<16x8xf32>
+  linalg.matmul ins(%A, %B: memref<16x16xf16>, memref<16x8xf16>)
+            outs(%C: memref<16x8xf32>)
+  return
+}
+
+module attributes {transform.with_named_sequence} {
+  transform.named_sequence @__transform_main(%arg1: !transform.any_op {transform.readonly}) {
+    %matmul = transform.structured.match ops{["linalg.matmul"]} in %arg1
+      : (!transform.any_op) -> !transform.any_op
+    transform.nvgpu.rewrite_matmul_as_mma_sync %matmul
+      : (!transform.any_op) -> ()
+    transform.yield
+  }
+}
+
+// -----
+
+// CHECK-LABEL: func.func @matmul_16x8x16xbf16_global
+func.func @matmul_16x8x16xbf16_global(
+    %A: memref<16x16xbf16>, %B: memref<16x8xbf16>, %C: memref<16x8xf32>) {
+
+  // CHECK-COUNT-8: memref.load {{.*}} : memref<16x16xbf16>
+  // CHECK-COUNT-8: vector.insert {{.*}} : bf16 into vector<4x2xbf16>
+  // CHECK-COUNT-4: memref.load {{.*}} : memref<16x8xbf16>
+  // CHECK-COUNT-4: vector.insert {{.*}} : bf16 into vector<2x2xbf16>
+  // CHECK-COUNT-4: memref.load {{.*}} : memref<16x8xf32>
+  // CHECK-COUNT-4: vector.insert {{.*}} : f32 into vector<2x2xf32>
+  //
+  //         CHECK: nvgpu.mma.sync(%{{.*}}) mmaShape = [16, 8, 16]
+  //    CHECK-SAME:   : (vector<4x2xbf16>, vector<2x2xbf16>, vector<2x2xf32>) -> vector<2x2xf32>
+  //
+  // CHECK-COUNT-4: vector.extract %{{.*}} : f32 from vector<2x2xf32>
+  // CHECK-COUNT-4: memref.store %{{.*}} : memref<16x8xf32>
+  linalg.matmul ins(%A, %B: memref<16x16xbf16>, memref<16x8xbf16>)
+            outs(%C: memref<16x8xf32>)
+  return
+}
+
+module attributes {transform.with_named_sequence} {
+  transform.named_sequence @__transform_main(%arg1: !transform.any_op {transform.readonly}) {
+    %matmul = transform.structured.match ops{["linalg.matmul"]} in %arg1
+      : (!transform.any_op) -> !transform.any_op
+    transform.nvgpu.rewrite_matmul_as_mma_sync %matmul
+      : (!transform.any_op) -> ()
+    transform.yield
+  }
+}
+
+// -----
+
+// CHECK-DAG: #[[$f8div4:.*]] = affine_map<()[s0] -> (s0 floordiv 4)>
+// CHECK-DAG: #[[$f8col:.*]] = affine_map<()[s0] -> (s0 * 4 - (s0 floordiv 4) * 16)>
+// CHECK-DAG: #[[$f8col16:.*]] = affine_map<()[s0] -> (s0 * 4 - (s0 floordiv 4) * 16 + 16)>
+
+// CHECK-LABEL: func.func @matmul_16x8x32xf8E4M3FN_global
+func.func @matmul_16x8x32xf8E4M3FN_global(
+    %A: memref<16x32xf8E4M3FN>, %B: memref<32x8xf8E4M3FN>, %C: memref<16x8xf32>) {
+
+  // The first A element of each thread is at (groupID, threadIDInGroup * 4), the
+  // ninth one is 16 columns further.
+  //         CHECK: %[[R0:.*]] = affine.apply #[[$f8div4]]()[%[[LANE:.*]]]
+  //         CHECK: %[[C0:.*]] = affine.apply #[[$f8col]]()[%[[LANE]]]
+  //         CHECK: memref.load %{{.*}}[%[[R0]], %[[C0]]] : memref<16x32xf8E4M3FN>
+  //         CHECK: %[[C16:.*]] = affine.apply #[[$f8col16]]()[%[[LANE]]]
+  //         CHECK: memref.load %{{.*}}[%{{.*}}, %[[C16]]] : memref<16x32xf8E4M3FN>
+  // CHECK-COUNT-16: vector.insert {{.*}} : f8E4M3FN into vector<4x4xf8E4M3FN>
+  //  CHECK-COUNT-8: memref.load {{.*}} : memref<32x8xf8E4M3FN>
+  //  CHECK-COUNT-8: vector.insert {{.*}} : f8E4M3FN into vector<2x4xf8E4M3FN>
+  //  CHECK-COUNT-4: memref.load {{.*}} : memref<16x8xf32>
+  //
+  //          CHECK: nvgpu.mma.sync(%{{.*}}) mmaShape = [16, 8, 32]
+  //     CHECK-SAME:   : (vector<4x4xf8E4M3FN>, vector<2x4xf8E4M3FN>, vector<2x2xf32>) -> vector<2x2xf32>
+  //
+  //  CHECK-COUNT-4: memref.store %{{.*}} : memref<16x8xf32>
+  linalg.matmul ins(%A, %B: memref<16x32xf8E4M3FN>, memref<32x8xf8E4M3FN>)
+            outs(%C: memref<16x8xf32>)
+  return
+}
+
+module attributes {transform.with_named_sequence} {
+  transform.named_sequence @__transform_main(%arg1: !transform.any_op {transform.readonly}) {
+    %matmul = transform.structured.match ops{["linalg.matmul"]} in %arg1
+      : (!transform.any_op) -> !transform.any_op
+    transform.nvgpu.rewrite_matmul_as_mma_sync %matmul
+      : (!transform.any_op) -> ()
+    transform.yield
+  }
+}
